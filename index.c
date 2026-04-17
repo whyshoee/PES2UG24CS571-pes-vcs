@@ -177,7 +177,7 @@ int index_save(const Index *index) {
 }
 
 int index_add(Index *index, const char *path) {
-    // Read the file contents
+    // 1. Read the file contents safely
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "error: cannot open '%s'\n", path);
@@ -188,15 +188,21 @@ int index_add(Index *index, const char *path) {
     long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    if (file_size < 0) { fclose(f); return -1; }
+    if (file_size < 0) { 
+        fclose(f); 
+        return -1; 
+    }
 
     uint8_t *contents = malloc(file_size + 1);
-    if (!contents) { fclose(f); return -1; }
+    if (!contents) { 
+        fclose(f); 
+        return -1; 
+    }
 
     size_t read_len = fread(contents, 1, file_size, f);
     fclose(f);
 
-    // Write blob to object store
+    // 2. Write blob to object store
     ObjectID blob_id;
     if (object_write(OBJ_BLOB, contents, read_len, &blob_id) != 0) {
         free(contents);
@@ -204,25 +210,20 @@ int index_add(Index *index, const char *path) {
     }
     free(contents);
 
-    // Get file metadata
+    // 3. Get file metadata
     struct stat st;
     if (lstat(path, &st) != 0) return -1;
 
-    // Determine mode
-    uint32_t mode;
-    if (st.st_mode & S_IXUSR) mode = 0100755;
-    else mode = 0100644;
+    uint32_t mode = (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
 
-    // Check if already in index
+    // 4. Update or add the entry
     IndexEntry *existing = index_find(index, path);
     if (existing) {
-        // Update existing entry
         existing->hash = blob_id;
         existing->mode = mode;
         existing->mtime_sec = (uint64_t)st.st_mtime;
         existing->size = (uint64_t)st.st_size;
     } else {
-        // Add new entry
         if (index->count >= MAX_INDEX_ENTRIES) {
             fprintf(stderr, "error: index full\n");
             return -1;
