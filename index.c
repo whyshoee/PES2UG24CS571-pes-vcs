@@ -241,3 +241,4 @@ int index_add(Index *index, const char *path) {
 // Phase 3: Loading logic
 // Phase 3: Persistence
 // Phase 3: Search
+// Phase 3: Formatting
