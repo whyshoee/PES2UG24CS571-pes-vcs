@@ -227,3 +227,4 @@ int commit_create(const char *message, ObjectID *commit_id_out) {
 }
 // Phase 4: Implementation of commit_serialize for object storage
 // Phase 4: Logic to retrieve parent hash via head_read
+// Phase 4: Core implementation of commit_create using tree_from_index
