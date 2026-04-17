@@ -670,3 +670,73 @@ This rescues the commits by giving them a named branch reference before garbage 
 
 **How Git avoids this**: Git uses a "grace period" — GC never deletes objects newer than 2 weeks old (configurable). This ensures that any in-progress operations have time to complete before GC considers an object unreachable. Git also uses lock files (`.git/index.lock`) to prevent concurrent index modifications. For `git gc --aggressive`, it first writes a `gc.pid` lock file to block other GC runs, and respects the `--prune=<date>` cutoff to only delete objects older than a safe threshold.
 
+
+---
+
+## Phase 5 & 6: Analysis Questions
+
+### Q5.1 — Implementing `pes checkout <branch>`
+
+To implement `pes checkout <branch>`, the following steps and file changes are needed:
+
+1. **Read the target branch ref**: Open `.pes/refs/heads/<branch>` and read the commit hash it contains.
+2. **Read the target commit object**: Parse it to get the root tree hash.
+3. **Walk the target tree recursively**: For every blob in the tree, extract the file content from the object store and write it to the working directory at the correct path.
+4. **Update `.pes/HEAD`**: Write `ref: refs/heads/<branch>` into HEAD so it now tracks the new branch.
+5. **Update the index**: Repopulate `.pes/index` with all entries from the checked-out tree (paths, modes, hashes, mtime/size from the newly written files).
+
+What makes this complex: You must handle files that exist in the current branch but not in the target (they must be deleted), files that exist in both (potentially overwriting), and new files that only exist in the target. You also need to create subdirectories as needed and set correct permissions.
+
+---
+
+### Q5.2 — Detecting a "dirty working directory" conflict
+
+Without comparing trees directly, you can detect conflicts using only the index and object store:
+
+1. Load the current index (represents staged/committed state).
+2. For each tracked file, `stat()` it and compare `mtime` and `size` to the index entry. If they differ, the file is locally modified.
+3. Additionally, read the blob stored at the index hash and compare its content to the actual file on disk (for files where metadata matches but content may differ).
+4. If the target branch's tree has a different blob hash for that same path than what's in the current index, and the working copy is dirty, then checkout must refuse with an error like "Your local changes to 'file.txt' would be overwritten by checkout."
+
+The key insight: if (working file differs from index entry) AND (target branch has a different version of that file), we have a conflict.
+
+---
+
+### Q5.3 — Detached HEAD and Recovery
+
+In detached HEAD state, `.pes/HEAD` contains a raw commit hash instead of `ref: refs/heads/main`. When you make commits in this state, `head_update()` writes the new commit hash directly into HEAD. These commits are valid objects in the store, but no branch pointer references them, so `pes log` won't show them unless HEAD is pointing at them.
+
+If a user switches branches or does another checkout, HEAD changes and the detached commits become unreachable. To recover:
+
+1. Note the commit hash shown in the terminal after the last detached commit.
+2. Create a new branch pointing to it: write that hash into `.pes/refs/heads/recovery-branch`.
+3. Update HEAD to `ref: refs/heads/recovery-branch`.
+
+This rescues the commits by giving them a named branch reference before garbage collection would remove them.
+
+---
+
+### Q6.1 — Garbage Collection Algorithm
+
+**Algorithm (Mark and Sweep):**
+
+1. **Mark phase**: Start from all branch refs (`.pes/refs/heads/*`) and HEAD. For each reachable commit, parse it to find its tree hash. Walk each tree recursively to find all blob and subtree hashes. Add every visited hash to a "reachable" set (a hash set / hash table for O(1) lookup).
+2. **Sweep phase**: Walk all files under `.pes/objects/`. For each object file, reconstruct its hash from its path (the directory + filename gives the full hex hash). If that hash is NOT in the reachable set, delete the file.
+
+**Data structure**: A hash set (e.g., an array of 64-bit integers or a boolean array indexed by truncated hash) for O(1) membership test.
+
+**Estimate for 100,000 commits, 50 branches**: Starting from 50 branch tips, you'd walk at most 100,000 commits. Each commit points to a tree; assuming average 50 files per commit, you'd visit ~5,000,000 tree/blob objects. With deduplication (unchanged files share objects), the actual unique object count visited might be 500,000–1,000,000. Each visit is O(1) lookup in the hash set.
+
+---
+
+### Q6.2 — GC Race Condition
+
+**The Race:**
+
+1. A `pes commit` runs: it calls `object_write` for a new blob (`blob_new`). The blob is written to disk but the commit object hasn't been written yet, so no ref points to `blob_new`.
+2. Concurrently, GC runs its mark phase: it sees `blob_new` exists in the store but finds no reachable reference to it (the commit linking to it doesn't exist yet). GC marks it as garbage.
+3. GC deletes `blob_new`.
+4. `pes commit` continues and tries to reference `blob_new` in a tree. The tree is written, the commit is written — but the blob object is gone. The repository is now corrupt.
+
+**How Git avoids this**: Git uses a "grace period" — GC never deletes objects newer than 2 weeks old (configurable). This ensures that any in-progress operations have time to complete before GC considers an object unreachable. Git also uses lock files (`.git/index.lock`) to prevent concurrent index modifications. For `git gc --aggressive`, it first writes a `gc.pid` lock file to block other GC runs, and respects the `--prune=<date>` cutoff to only delete objects older than a safe threshold.
+
